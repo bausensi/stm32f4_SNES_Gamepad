@@ -37,14 +37,14 @@ CFLAGS += $(AFLAGS)
 
 # tell ld which linker file to use
 # (this file is in the current directory)
-LFLAGS  = -Tstm32_flash.ld
+LFLAGS  = -Tstm32_flash.ld --specs=nosys.specs --specs=nano.specs
 
 
 ################################################################################
 #                   SOURCE FILES DIRECTORIES                                   #
 ################################################################################
 # Specify the root of you STM32f4 FW
-STM_ROOT         =../STM32F4-Discovery_FW_V1.1.0
+STM_ROOT         =./STM32F4-Discovery-Firmware-master
 
 STM_SRC_DIR      = $(STM_ROOT)/Libraries/STM32F4xx_StdPeriph_Driver/src
 STM_SRC_DIR     += $(STM_ROOT)/Utilities/STM32F4-Discovery

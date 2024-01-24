@@ -4,13 +4,9 @@
 #include "usbd_usr.h"
 #include "usbd_desc.h"
 
-#define ALL_LED_PINS   (GPIO_Pin_12 | GPIO_Pin_13 | GPIO_Pin_14 | GPIO_Pin_15)
-#define LEDS_N  4
-
-static const uint16_t led[LEDS_N] = {
-/*  LD4, green    LD3, orange    LD5, red      LD6, blue   */
-    GPIO_Pin_12 , GPIO_Pin_13 , GPIO_Pin_14 , GPIO_Pin_15
-};
+#define CLOCK GPIO_Pin_13
+#define LATCH GPIO_Pin_14
+#define DATA  GPIO_Pin_15
 
 static void initGPIO(void);
 static void initTimer(void);
@@ -19,14 +15,42 @@ static uint32_t configUSB(void);
 
 static uint32_t delayTime;
 
-__ALIGN_BEGIN USB_OTG_CORE_HANDLE  USB_OTG_dev __ALIGN_END; // The USB device
+static volatile uint8_t should_poll = 0;
 
-int main(void)
-{
+__ALIGN_BEGIN USB_OTG_CORE_HANDLE  USB_OTG_dev __ALIGN_END; // The USB device
+                                                            // 
+
+uint16_t snes_poll(void) {
+    uint16_t mask = 0;
+
+    GPIO_SetBits(GPIOC, LATCH);
+    USB_OTG_BSP_uDelay(12);
+    GPIO_ResetBits(GPIOC, LATCH);
+
+    for(uint32_t i = 0; i < 16; i++) {
+        USB_OTG_BSP_uDelay(6);
+        GPIO_ResetBits(GPIOC, CLOCK);
+    
+        mask |= (uint16_t)GPIO_ReadInputDataBit(GPIOC, DATA) << i;
+
+        USB_OTG_BSP_uDelay(6);
+        GPIO_SetBits(GPIOC, CLOCK);
+    
+    }
+    return ~mask;
+}
+
+int main(void) {
     delayTime = 10;
     appInit();
 
-    while (1);
+    while (1) {
+        USB_OTG_BSP_uDelay(1000);
+        uint16_t mask = snes_poll();
+
+        uint8_t  report[2] = { (uint8_t)( mask & 0xFF ), (uint8_t)( mask >> 8 ) };
+        USBD_HID_SendReport (&USB_OTG_dev, &report, 2);
+    }
 
     return 0;
 }
@@ -37,111 +61,29 @@ void appInit(void){
     configUSB();
 }
 
-
 /******* The interrupt handler ***/
-// As of now set to 1ms.. 
 // Read the GPIO in to an 8 bit integer, send the report aka the 8 bit integer
 
-void TIM7_IRQHandler(void)
-{
-    static uint32_t delayCounter = 0;
-    static uint8_t segaPins = 0; // This is used when sending the report.
-    uint16_t inputRead; // Used as a temporary variable for the read
-
-    if (delayCounter > 0) {
-        delayCounter--;
-    }
-    else{
-	/* Poll the controller for input */
-	segaPins = 0;
-	// Set CS high..
-	GPIO_SetBits(GPIOA, GPIO_Pin_6);
-	inputRead = ~(GPIO_ReadInputData(GPIOA) & 0x3F);
-	segaPins = (uint8_t)(inputRead & 0x000F); // Add UP,DOWN,LEFT, RIGHT..
-	segaPins |= (uint8_t)(0x0010 & inputRead) << 1; // Add "B" to bit 5
-        segaPins |= (uint8_t)(0x0020 & inputRead) << 1; // Add "C" to bit 6
-	// Set CS low..	
-	GPIO_ResetBits(GPIOA, GPIO_Pin_6);
-	inputRead = ~(GPIO_ReadInputData(GPIOA) & 0x3F);
-	segaPins |= (uint8_t)(0x0010 & inputRead); // Add "A" to bit 4 
-	segaPins |= (uint8_t)(0x0020 & inputRead) << 2; // Add "Start" to bit 7..
-
-	/* Send the input to USB */
-	USBD_HID_SendReport (&USB_OTG_dev,
-			     &segaPins,
-			     1);
-	
-	/* Blink the leds according to the input */
-	/* blink all leds for A,B,C */
-	if(segaPins & 0x10 || segaPins & 0x20 || segaPins & 0x40){
-	    GPIO_SetBits(GPIOD, ALL_LED_PINS);
-	}
-	else{
-	    /* Blink the leds according to the joystick */
-	    GPIO_ResetBits(GPIOD, ALL_LED_PINS);
-
-	    if(segaPins & 0x01)
-		GPIO_SetBits(GPIOD, GPIO_Pin_13);
-	    else 
-		GPIO_ResetBits(GPIOD, GPIO_Pin_13);
-
-	    if(segaPins & 0x02)
-		GPIO_SetBits(GPIOD, GPIO_Pin_15);
-	    else 
-		GPIO_ResetBits(GPIOD, GPIO_Pin_15);
-
-	    if(segaPins & 0x04)
-		GPIO_SetBits(GPIOD, GPIO_Pin_12);
-	    else 
-		GPIO_ResetBits(GPIOD, GPIO_Pin_12);
-	
-	    if(segaPins & 0x08)
-		GPIO_SetBits(GPIOD, GPIO_Pin_14);
-	    else 
-		GPIO_ResetBits(GPIOD, GPIO_Pin_14);	    
-	}
-
-	delayCounter = delayTime;
-    }
-    
-    /* Clear the TIM7 interrupt source or else the NVIC hardware
-       sees the pending bit and thinks TIM7 is emiting the
-       interupt again
-       (mark this interrupt as handled) */
-    TIM_ClearITPendingBit(TIM7, TIM_IT_Update);
-}
-
-
 void initGPIO(void){
-    // Init the leds..
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOD, ENABLE);
-
-    GPIO_InitTypeDef gpio_init;
-    gpio_init.GPIO_Mode  = GPIO_Mode_OUT;
-    gpio_init.GPIO_OType = GPIO_OType_PP;
-    gpio_init.GPIO_Pin   = ALL_LED_PINS;
-    gpio_init.GPIO_PuPd  = GPIO_PuPd_NOPULL;
-    gpio_init.GPIO_Speed = GPIO_Speed_100MHz;
-    GPIO_Init(GPIOD, &gpio_init);
-
-    // Init the GPIO for the sega controller
+    // Init the GPIO for the SNES controller
     // First configure the inputs
-    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOA, ENABLE);
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
     
-    GPIO_InitTypeDef gpio_sega;
-    gpio_sega.GPIO_Mode = GPIO_Mode_IN;
-    gpio_sega.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3 | GPIO_Pin_4 | GPIO_Pin_5; // Continue here..
-    gpio_sega.GPIO_OType = GPIO_OType_PP;
-    gpio_sega.GPIO_Speed = GPIO_Speed_100MHz;
-    gpio_sega.GPIO_PuPd  = GPIO_PuPd_NOPULL;
-    GPIO_Init(GPIOA, &gpio_sega);
+    GPIO_InitTypeDef gpio_snes;
     // Configure the output pin
-    gpio_sega.GPIO_Mode = GPIO_Mode_OUT;
-    gpio_sega.GPIO_Pin = GPIO_Pin_6; // Continue here..
-    gpio_sega.GPIO_OType = GPIO_OType_PP;
-    gpio_sega.GPIO_Speed = GPIO_Speed_100MHz;
-    gpio_sega.GPIO_PuPd  = GPIO_PuPd_NOPULL;
-    GPIO_Init(GPIOA, &gpio_sega);
+    gpio_snes.GPIO_Mode = GPIO_Mode_OUT;
+    gpio_snes.GPIO_Pin = GPIO_Pin_13 | GPIO_Pin_14;
+    gpio_snes.GPIO_OType = GPIO_OType_PP;
+    gpio_snes.GPIO_Speed = GPIO_Speed_100MHz;
+    gpio_snes.GPIO_PuPd  = GPIO_PuPd_DOWN;
+    GPIO_Init(GPIOC, &gpio_snes);
+    
+    gpio_snes.GPIO_Mode = GPIO_Mode_IN;
+    gpio_snes.GPIO_Pin = GPIO_Pin_15;
+    gpio_snes.GPIO_OType = GPIO_OType_PP;
+    gpio_snes.GPIO_Speed = GPIO_Speed_100MHz;
+    gpio_snes.GPIO_PuPd  = GPIO_PuPd_DOWN;
+    GPIO_Init(GPIOC, &gpio_snes);
 }
 
 
@@ -171,7 +113,7 @@ void initTimer(void){
        This way we get an interrupt every millisecond.
      */
     timInitStruct.TIM_Prescaler     = 1000;
-    timInitStruct.TIM_Period        = 84;
+    timInitStruct.TIM_Period        = 84 * 2;
 
     /* store this data into memory */
     TIM_TimeBaseInit(TIM7, &timInitStruct);
